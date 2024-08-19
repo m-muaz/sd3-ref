@@ -172,8 +172,11 @@ class SDTokenizer:
         self.max_word_length = 8
 
 
-    def tokenize_with_weights(self, text:str):
+    def tokenize_with_weights(self, text:str, max_length=None):
         """Tokenize the text, with weight values - presume 1.0 for all and ignore other features here. The details aren't relevant for a reference impl, and weights themselves has weak effect on SD3."""
+        if max_length is not None:
+            self.max_length = max_length
+            
         if self.pad_with_end:
             pad_token = self.end_token
         else:
