@@ -6,12 +6,15 @@
 # Also can have
 # - `sd3_vae.safetensors` (holds the VAE separately if needed)
 
+import os
+from glob import glob
 import torch, fire, math
 from safetensors import safe_open
 from other_impls import SDClipModel, SDXLClipG, T5XXLModel, SD3Tokenizer
 from sd3_impls import BaseModel, sample_euler, SDVAE, CFGDenoiser, SD3LatentFormat
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+from tqdm import tqdm
 
 
 #################################################################################################
@@ -89,7 +92,7 @@ T5_CONFIG = {
 
 class T5XXL:
     def __init__(self):
-        with safe_open("models/t5xxl.safetensors", framework="pt", device="cpu") as f:
+        with safe_open("models/t5xxl_fp16.safetensors", framework="pt", device="cpu") as f:
             self.model = T5XXLModel(T5_CONFIG, device="cpu", dtype=torch.float32)
             load_into(f, self.model.transformer, "", "cpu", torch.float32)
 
@@ -111,6 +114,13 @@ class VAE:
             load_into(f, self.model, prefix, "cpu", torch.float16)
 
 
+# == Load prompts from txt file ==
+def load_prompts(prompt_path, start_idx=None, end_idx=None):
+    with open(prompt_path, "r") as f:
+        prompts = [line.strip() for line in f.readlines()]
+    prompts = prompts[start_idx:end_idx]
+    return prompts
+
 #################################################################################################
 ### Main inference logic
 #################################################################################################
@@ -122,7 +132,9 @@ SHIFT = 3.0
 WIDTH = 1024
 HEIGHT = 1024
 # Pick your prompt
-PROMPT = "a photo of a cat"
+PROMPT = None
+# OR use txt file to load prompts
+PROMPT_PATH=None
 # Most models prefer the range of 4-5, but still work well around 7
 CFG_SCALE = 5
 # Different models want different step counts but most will be good at 50, albeit that's slow to run
@@ -139,7 +151,7 @@ INIT_IMAGE = None
 # If init_image is given, this is the percentage of denoising steps to run (1.0 = full denoise, 0.0 = no denoise at all)
 DENOISE = 0.6
 # Output file path
-OUTPUT = "output.png"
+OUTPUT = "./sampled_images"
 
 class SD3Inferencer:
     def load(self, model=MODEL, vae=VAEFile, shift=SHIFT):
@@ -182,7 +194,9 @@ class SD3Inferencer:
 
     def get_cond(self, prompt):
         print("Encode prompt...")
+        print(f"Prompt: {prompt}")
         tokens = self.tokenizer.tokenize_with_weights(prompt)
+        print(len(tokens["l"][0]))
         l_out, l_pooled = self.clip_l.model.encode_token_weights(tokens["l"])
         g_out, g_pooled = self.clip_g.model.encode_token_weights(tokens["g"])
         t5_out, t5_pooled = self.t5xxl.model.encode_token_weights(tokens["t5xxl"])
@@ -245,25 +259,77 @@ class SD3Inferencer:
         print("Decoded")
         return out_image
 
-    def gen_image(self, prompt=PROMPT, width=WIDTH, height=HEIGHT, steps=STEPS, cfg_scale=CFG_SCALE, seed=SEED, output=OUTPUT, init_image=INIT_IMAGE, denoise=DENOISE):
-        latent = self.get_empty_latent(width, height)
-        if init_image:
-            image_data = Image.open(init_image)
-            image_data = image_data.resize((width, height), Image.LANCZOS)
-            latent = self.vae_encode(image_data)
-            latent = SD3LatentFormat().process_in(latent)
-        conditioning = self.get_cond(prompt)
-        neg_cond = self.get_cond("")
-        sampled_latent = self.do_sampling(latent, seed, conditioning, neg_cond, steps, cfg_scale, denoise if init_image else 1.0)
-        image = self.vae_decode(sampled_latent)
-        print(f"Will save to {output}")
-        image.save(output)
+    def gen_image(self, prompt=PROMPT, prompt_path=PROMPT_PATH, width=WIDTH, height=HEIGHT, steps=STEPS, cfg_scale=CFG_SCALE, seed=SEED, output=OUTPUT, init_image=INIT_IMAGE, denoise=DENOISE):
+        #== Make sure OUTPUT dir exists ==
+        os.makedirs(OUTPUT, exist_ok=True)
+        batch_size = 1
+        if prompt is None:
+            if prompt_path is not None:
+                prompts = load_prompts(prompt_path)
+            else:
+                prompts = ["a cat holding a sign that says hello world"]
+        else:
+            prompts = [prompt]
+        
+        for i in tqdm(range(0, len(prompts), batch_size)):
+            prompt = prompts[i:i+batch_size][0] # FIX: handle case where batch_size > 1
+            latent = self.get_empty_latent(width, height)
+            if init_image:
+                image_data = Image.open(init_image)
+                image_data = image_data.resize((width, height), Image.LANCZOS)
+                latent = self.vae_encode(image_data)
+                latent = SD3LatentFormat().process_in(latent)
+            conditioning = self.get_cond(prompt)
+            neg_cond = self.get_cond("")
+            sampled_latent = self.do_sampling(latent, seed, conditioning, neg_cond, steps, cfg_scale, denoise if init_image else 1.0)
+            image = self.vae_decode(sampled_latent)
+            
+            # Calculate text size and create a new image with space for the text
+            font = ImageFont.load_default()
+            # Calculate text size
+            text_bbox = font.getbbox(prompt)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+
+            # Create a new image with extra space at the top for the text
+            new_image_height = image.height + text_height + 20
+            new_image = Image.new('RGB', (image.width, new_image_height), (255, 255, 255))  # White background
+
+            # Draw the original image onto the new image
+            new_image.paste(image, (0, text_height + 20))
+
+            # Draw the prompt text at the top of the new image
+            draw = ImageDraw.Draw(new_image)
+            draw.text((10, 10), prompt, font=font, fill=(0, 0, 0))  # Black text color
+            
+            # Save the image
+            base_count = len(glob(os.path.join(OUTPUT, "*.png")))
+            image_output = os.path.join(OUTPUT, f"sample_{base_count}.png")
+            print(f"Will save to {image_output}")
+            new_image.save(image_output)
         print("Done")
 
 @torch.no_grad()
-def main(prompt=PROMPT, width=WIDTH, height=HEIGHT, steps=STEPS, cfg_scale=CFG_SCALE, shift=SHIFT, model=MODEL, vae=VAEFile, seed=SEED, output=OUTPUT, init_image=INIT_IMAGE, denoise=DENOISE):
+def main(prompt=PROMPT, prompt_path=PROMPT_PATH, width=WIDTH, height=HEIGHT, steps=STEPS, cfg_scale=CFG_SCALE, shift=SHIFT, model=MODEL, vae=VAEFile, seed=SEED, output=OUTPUT, init_image=INIT_IMAGE, denoise=DENOISE):
     inferencer = SD3Inferencer()
     inferencer.load(model, vae, shift)
-    inferencer.gen_image(prompt, width, height, steps, cfg_scale, seed, output, init_image, denoise)
+    inferencer.gen_image(prompt, prompt_path, width, height, steps, cfg_scale, seed, output, init_image, denoise)
 
 fire.Fire(main)
+
+# if __name__ == "__main__":
+#     import torch
+#     from diffusers import StableDiffusion3Pipeline
+
+#     pipe = StableDiffusion3Pipeline.from_pretrained(
+#         "../stable-diffusion-3-medium", torch_dtype=torch.float16
+#     ).to("cuda")
+
+#     image = pipe(
+#         "A cat holding a sign that says hello world",
+#         negative_prompt="",
+#         num_inference_steps=28,
+#         guidance_scale=7.0,
+#     ).images[0]
+#     image.save("sample.png")
+
