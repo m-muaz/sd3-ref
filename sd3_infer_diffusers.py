@@ -3,11 +3,16 @@ from glob import glob
 import torch
 import fire
 import math  # noqa: F401
-from diffusers import StableDiffusion3Pipeline, FlowMatchEulerDiscreteScheduler
+from diffusers import (
+    StableDiffusion3Pipeline,
+    FlowMatchEulerDiscreteScheduler,
+    SD3Transformer2DModel,
+)
 from diffusers.utils import pt_to_pil
 from transformers import (T5EncoderModel, T5TokenizerFast, BitsAndBytesConfig)
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont
+import tomesd
 
 
 # Note: Sigma shift value, publicly released models use 3.0
@@ -41,6 +46,9 @@ DEVICE = "cuda"
 DROP_T5XXL_TOKENIZER_AND_ENCODER = False
 ENABLE_QUANTIZED_T5XXL_ENCODER = False
 
+## TOKEN MERGING ##
+ENABLE_TOKEN_MERGING = False
+
 # == Load prompts from txt file ==
 def load_prompts(prompt_path, start_idx=None, end_idx=None):
     with open(prompt_path, "r") as f:
@@ -65,6 +73,7 @@ def main(
     device=DEVICE,
     drop_t5=DROP_T5XXL_TOKENIZER_AND_ENCODER,
     use_quantized_t5=ENABLE_QUANTIZED_T5XXL_ENCODER,
+    enable_tomesd=ENABLE_TOKEN_MERGING,
 ):
     if model_path is not None:
         # Make the path absolute and make sure it exists
@@ -98,6 +107,12 @@ def main(
     #== Flow Match Euler Discrete Scheduler ==
     print("Loading Scheduler + Pipeline...")
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(model_path, subfolder="scheduler")
+    
+    # == Load Transformer2D Model ==
+    sd3_transformer = SD3Transformer2DModel.from_pretrained(model_path, subfolder="transformer")
+    if enable_tomesd:
+        print("[Memory Optimizations] Enabling Token Merging...")
+        tomesd.apply_patch(sd3_transformer, tm_ratio=0.5, bm_ratio=0.5, max_downsample=16) # FIX: Look into the way API is being designed and called
     
     # == T5 Tokenizer and Encoder ==
     if drop_t5:
@@ -133,6 +148,7 @@ def main(
         scheduler=scheduler,
         text_encoder_3=text_encoder_3,
         tokenizer_3=tokenizer_3,
+        transformer=sd3_transformer,
         torch_dtype=torch.float16,
     )
     pipe.enable_model_cpu_offload()
