@@ -105,6 +105,10 @@ def main(
     for i in tqdm(range(0, len(prompts), batch_size)):
         prompt = prompts[i:i+batch_size] # FIX: handle case where batch_size > 1
         negative_prompt = negative_prompts[i:i+batch_size]
+        print("-" *20)
+        print(f"Current prompt: {prompt}")
+        print(f"Current negative prompt: {negative_prompt}")
+        print("-" *20)
         images = pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
