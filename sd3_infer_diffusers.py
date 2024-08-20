@@ -5,6 +5,7 @@ import fire
 import math  # noqa: F401
 from diffusers import StableDiffusion3Pipeline, FlowMatchEulerDiscreteScheduler
 from diffusers.utils import pt_to_pil
+from transformers import (T5EncoderModel, T5TokenizerFast, BitsAndBytesConfig)
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont
 
@@ -36,6 +37,10 @@ OUTPUT = "./sampled_images"
 # DEVICE [cuda, cpu]
 DEVICE = "cuda"
 
+## MEMORY OPTIMIZATIONS ##
+DROP_T5XXL_TOKENIZER_AND_ENCODER = False
+ENABLE_QUANTIZED_T5XXL_ENCODER = False
+
 # == Load prompts from txt file ==
 def load_prompts(prompt_path, start_idx=None, end_idx=None):
     with open(prompt_path, "r") as f:
@@ -58,6 +63,8 @@ def main(
     init_image=INIT_IMAGE,
     denoise=DENOISE,
     device=DEVICE,
+    drop_t5=DROP_T5XXL_TOKENIZER_AND_ENCODER,
+    use_quantized_t5=ENABLE_QUANTIZED_T5XXL_ENCODER,
 ):
     if model_path is not None:
         # Make the path absolute and make sure it exists
@@ -91,12 +98,41 @@ def main(
     #== Flow Match Euler Discrete Scheduler ==
     print("Loading Scheduler + Pipeline...")
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(model_path, subfolder="scheduler")
+    
+    # == T5 Tokenizer and Encoder ==
+    if drop_t5:
+        print("[Memory Optimizations] Dropping T5XXL Tokenizer and Encoder...")
+        text_encoder_3 = None
+        tokenizer_3 = None
+    else:
+        # == Load T5 Tokenizer and Encoder ==
+        text_encoder_3 = T5EncoderModel.from_pretrained(model_path, subfolder="text_encoder_3")
+        tokenizer_3 = T5TokenizerFast.from_pretrained(model_path, subfolder="tokenizer_3")
+    
+    if use_quantized_t5:
+        try:
+            import bitsandbytes as bnb
+            # quantization_config = BitsAndBytesConfig(load_in_8bit=True)  # Enable 8-bit quantization
+            print("Enabling 8-bit quantized T5XXL encoder...")
+            text_encoder_3 = T5EncoderModel.from_pretrained(
+                model_path, subfolder="text_encoder_3", load_in_8bit=True, device_map="auto",
+            )
+            tokenizer_3 = T5TokenizerFast.from_pretrained(
+                model_path, subfolder="tokenizer_3"
+            )
+        except ImportError:
+            print("Please install bitsandbytes to enable quantized T5XXL encoder")
+            print("pip install bitsandbytes")
+            print("Disabling T5XXL encoder + tokenizer and continuing...")
+            text_encoder_3 = None
+            tokenizer_3 = None
+        
     generator = torch.manual_seed(seed)
     pipe = StableDiffusion3Pipeline.from_pretrained(
         model_path,
         scheduler=scheduler,
-        text_encoder_3=None,
-        tokenizer_3=None,
+        text_encoder_3=text_encoder_3,
+        tokenizer_3=tokenizer_3,
         torch_dtype=torch.float16,
     )
     pipe.enable_model_cpu_offload()
