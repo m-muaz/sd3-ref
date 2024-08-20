@@ -4,6 +4,7 @@ import torch
 import fire
 import math  # noqa: F401
 from diffusers import StableDiffusion3Pipeline, FlowMatchEulerDiscreteScheduler
+from diffusers.utils import pt_to_pil
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont
 
@@ -90,10 +91,15 @@ def main(
     #== Flow Match Euler Discrete Scheduler ==
     print("Loading Scheduler + Pipeline...")
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(model_path, subfolder="scheduler")
-    generator = torch.Generator(device=device).manual_seed(seed)
+    generator = torch.manual_seed(seed)
     pipe = StableDiffusion3Pipeline.from_pretrained(
-    model_path, scheduler=scheduler, torch_dtype=torch.float16
-    ).to(device)
+        model_path,
+        scheduler=scheduler,
+        text_encoder_3=None,
+        tokenizer_3=None,
+        torch_dtype=torch.float16,
+    )
+    pipe.enable_model_cpu_offload()
     print("Done!")
     
     for i in tqdm(range(0, len(prompts), batch_size)):
@@ -106,35 +112,36 @@ def main(
             width=width,
             num_inference_steps=steps,
             guidance_scale=cfg_scale,
-            gerenator=generator,            
             num_images_per_prompt=batch_size,
-        ).images[0]
+            generator=generator,
+            output_type="pil",
+        ).images
         
-        if batch_size > 1:
-            for j, image in enumerate(images):
-                # Calculate text size and create a new image with space for the text
-                font = ImageFont.load_default()
-                # Calculate text size
-                text_bbox = font.getbbox(prompt[i])
-                text_width = text_bbox[2] - text_bbox[0]
-                text_height = text_bbox[3] - text_bbox[1]
+        print(len(images))
+        for j, image in enumerate(images):
+            # # Calculate text size and create a new image with space for the text
+            # font = ImageFont.load_default()
+            # # Calculate text size
+            # text_bbox = font.getbbox(prompt[i])
+            # text_width = text_bbox[2] - text_bbox[0]
+            # text_height = text_bbox[3] - text_bbox[1]
 
-                # Create a new image with extra space at the top for the text
-                new_image_height = image.height + text_height + 20
-                new_image = Image.new('RGB', (image.width, new_image_height), (255, 255, 255))  # White background
+            # # Create a new image with extra space at the top for the text
+            # new_image_height = image.height + text_height + 20
+            # new_image = Image.new('RGB', (image.width, new_image_height), (255, 255, 255))  # White background
 
-                # Draw the original image onto the new image
-                new_image.paste(image, (0, text_height + 20))
+            # # Draw the original image onto the new image
+            # new_image.paste(image, (0, text_height + 20))
 
-                # Draw the prompt text at the top of the new image
-                draw = ImageDraw.Draw(new_image)
-                draw.text((10, 10), prompt, font=font, fill=(0, 0, 0))  # Black text color
+            # # Draw the prompt text at the top of the new image
+            # draw = ImageDraw.Draw(new_image)
+            # draw.text((10, 10), prompt, font=font, fill=(0, 0, 0))  # Black text color
 
-                # Save the image
-                base_count = len(glob(os.path.join(OUTPUT, "*.png")))
-                image_output = os.path.join(OUTPUT, f"sample_{base_count}.png")
-                print(f"Will save to {image_output}")
-                new_image.save(image_output)
+            # Save the image
+            base_count = len(glob(os.path.join(OUTPUT, "*.png")))
+            image_output = os.path.join(OUTPUT, f"sample_{base_count}.png")
+            print(f"Will save to {image_output}")
+            image.save(image_output)
         
     print("Done!")
     
